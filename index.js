@@ -1,50 +1,79 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const mongoose = require('mongoose');
+const { MongoStore } = require('wwebjs-mongo');
+const connectDB = require('./db');
+const Message = require('./models/message_model');
 
 
-const client =new Client({
-  authStrategy: new LocalAuth(),
-  puppeteer: {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-  }
-});
-
-client.on('ready', () =>{
-    console.log('Client is ready!');
-});
-
-// When the client received QR-Code
-client.on('qr', (qr) => {
-  qrcode.generate(qr, {small: true});
-});
-
-client.on('message_create', message => {
-  // console.log(message);
-	if (message.body === 'ping') {
-		// send back "pong" to the chat the message was sent in
-		client.sendMessage(message.from, 'pong');
-    console.log('My message: pong');
-    // console.log(message.body);
-	}
-});
-
-client.on("message_create",async (message) => {
-  if(message.body === 'history') {
-
-    const chat = message.getChat(); //chat object
+async function initializeClient() {
+  try {
+    await connectDB(); 
+    const store = new MongoStore({ mongoose: mongoose });
     
-    const messages = await (await chat).fetchMessages({limit: 40}); 
-
-    console.log('previous messages:');
-
-    messages.forEach(msg => {
-      console.log(`[${msg.fromMe ? 'Me' : 'Other'}] ${msg.body}`);
+    const client = new Client({
+      authStrategy: new RemoteAuth({
+        store: store,
+        backupSyncIntervalMs: 300000, // 5 minutes
+      }),
+      puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      }
     });
 
-    client.sendMessage(message.from, 'Fetched previous messages, check logs.');
-  }
-})
+    // Event handlers
+    client.on('ready', () => {
+      console.log('Client is ready!');
+    });
 
-// Start your client
-client.initialize();
+    client.on('qr', (qr) => {
+      qrcode.generate(qr, {small: true});
+      console.log('QR RECEIVED', qr);
+    });
+
+    client.on('remote_session_saved', () => {
+      console.log('Session saved to MongoDB!');
+    });
+
+    client.on("message_create", async (message) => {
+      try {
+        const {
+          from,
+          fromMe,
+          body,
+          timestamp
+        } = message;
+
+        const newMessage = new Message({
+          chatId: from,
+          sender: fromMe ? 'me' : from,
+          message: body,
+          timestamp: timestamp.toString()
+        });
+        
+        await newMessage.save();
+        console.log('Message saved to MongoDB:', message.body);
+      
+        // Format the timestamp from WhatsApp
+        const date = new Date(timestamp * 1000); //milliseconds
+        const formattedTime = date.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+        console.log('Formatted Time:', formattedTime);
+        
+        if (message.body.toLowerCase() === 'ping') {
+          client.sendMessage(message.from, 'pong');
+        }
+      } catch (error) {
+        console.error('Error saving message:', error);
+      }
+    });
+
+    await client.initialize();
+    
+  } catch (error) {
+    console.error('Failed to initialize WhatsApp client:', error);
+  }
+}
+
+// Start the client
+initializeClient();
